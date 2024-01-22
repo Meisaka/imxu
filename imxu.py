@@ -140,7 +140,10 @@ class CBMessage:
 		else: raise ValueError('no encoding for type:'+repr(val.__class__.__qualname__))
 
 class IMXPSession():
-	__slots__ = ('ses', 'sys', 'ext_ids', 'cmd', 'dbg_status', 'dbg_len')
+	__slots__ = (
+		'ses', 'sys', 'ext_ids', 'cmd',
+		'dbg_status', 'dbg_len',
+		'__dict__')
 	def __init__(self, ses, sys, ext_ids):
 		self.ses = ses
 		self.sys = sys # type: IMXPService
@@ -173,13 +176,16 @@ class IMXPSession():
 		res = bytearray(struct.pack('<H', cc|8))
 		msg = CBMessage(res)
 		msg.append(self.sys.ports)
+		self.sys.chan_reset_status()
 		self.sys.last_ses = self
 		print('req-serial', self.sys.ports, res)
 		self.dbg_status = 0
 		self.ses.send(res)
 	def f_182(self, cc, param):
 		data = param[1:]
-		self.sys.chan_send(param[0], data)
+		chan = self.sys.chan_get(param[0])
+		if chan is None: return
+		chan.send(data)
 		if data[0] == 10:
 			self.dbg_some(2, '\n')
 			self.dbg_status = 0
@@ -189,7 +195,13 @@ class IMXPSession():
 		res = struct.pack('<HB', 0x1820, index) + data
 		self.ses.send(res)
 	def f_183(self, cc, param):
+		chan = self.sys.chan_get(param[0])
+		if chan is None: return
 		self.dbg_some(0, '{} {} {}'.format('ctl-serial', param[0], param[1]))
+		chan.set_status(param[1])
+		if not chan.status_sent:
+			chan.status_sent = True
+			res = struct.pack("<HBB", 0x1830, param[0], 1)
 	# filesys ext
 	def f_200(self, cc, param):
 		path = param.partition(b'\0')[0].decode('UTF8')
@@ -224,6 +236,7 @@ class SerialChannel:
 		else: b, p, d, s = 9600, serial.PARITY_NONE, serial.EIGHTBITS, serial.STOPBITS_ONE
 		self.tx_buf = bytearray()
 		self.rx_buf = bytearray()
+		self.status_sent = False
 		self.index = chan_index
 		self.dev = serial.Serial(port=port, baudrate=b, bytesize=d, parity=p, stopbits=s)
 		self.tx_event = threading.Event()
@@ -231,6 +244,13 @@ class SerialChannel:
 		self.tx_thread = threading.Thread(target=serial_tx, args=(self,), daemon=True)
 		self.tx_thread.start()
 		self.rx_thread.start()
+	def reset_status(self):
+		self.status_sent = False
+	def set_status(self, mode):
+		pass
+	def send(self, data):
+		self.tx_buf.extend(data)
+		self.tx_event.set()
 
 def serial_rx(chan: SerialChannel):
 	while True:
@@ -262,11 +282,14 @@ class IMXPService:
 			index += 1
 		if len(fsconfig) > 0:  self.ext_ids.append(2)
 		if len(comconfig) > 0: self.ext_ids.append(3)
-	def chan_send(self, chan_index, data):
+	def chan_reset_status(self):
+		for chan in self.channels:
+			chan.reset_status()
+	def chan_get(self, chan_index):
 		for chan in self.channels:
 			if chan.index == chan_index:
-				chan.tx_buf.extend(data)
-				chan.tx_event.set()
+				return chan
+		return None
 	def process(self):
 		if self.last_ses is not None:
 			for chan in self.channels:
